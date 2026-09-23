@@ -1,6 +1,6 @@
 #!/bin/sh
 
-version_number="5.1.4"
+version_number="5.2.1"
 
 # UI
 
@@ -314,35 +314,91 @@ time_until_next_ep() {
 }
 
 # HISTORY
+# one line per anime: episode \t id \t title \t last watched (unix time) \t position (seconds to resume from, 0 = none)
+# files written before 5.2.1 lack the last two columns
 
 backup_old_hist() {
     backupfile="${histfile}.v4"
     : >"${histfile}.new"
-    while IFS="	" read -r ep_no anime_id anime_title; do
+    while IFS="	" read -r ep_no anime_id _rest; do
         case "$anime_id" in
-            *-*) printf "%s\t%s\t%s\n" "$ep_no" "$anime_id" "$anime_title" >>"${histfile}.new" ;;
-            *) printf "%s\t%s\t%s\n" "$ep_no" "$anime_id" "$anime_title" >>"$backupfile" ;;
+            *-*) printf "%s\t%s\t%s\n" "$ep_no" "$anime_id" "$_rest" >>"${histfile}.new" ;;
+            *) printf "%s\t%s\t%s\n" "$ep_no" "$anime_id" "$_rest" >>"$backupfile" ;;
         esac
     done <"$histfile"
     mv "${histfile}.new" "$histfile"
 }
 
-process_hist_entry() {
-    ep_list=$(hianime_episodes "$anime_id" | cut -f 2)
-    ep_no=$(printf "%s" "$ep_list" | sed -n "/^${ep_no}$/{n;p;}") 2>/dev/null
-    [ -n "$ep_no" ] && printf "%s\t%s - episode %s\n" "$anime_id" "$anime_title" "$ep_no"
+# seconds as m:ss or h:mm:ss
+clock() {
+    if [ "$1" -ge 3600 ]; then
+        printf "%d:%02d:%02d" $(($1 / 3600)) $(($1 % 3600 / 60)) $(($1 % 60))
+    else
+        printf "%d:%02d" $(($1 / 60)) $(($1 % 60))
+    fi
 }
 
-update_history() {
-    if grep -q "	${anime_id}	" "$histfile"; then
-        # escape sed special chars in replacement: & and \ and delimiter |
-        safe_title=$(printf "%s" "$anime_title" | sed 's|[&\|]|\\&|g')
-        sed -E "s|^[^	]+	${anime_id}	[^	]+$|${ep_no}	${anime_id}	${safe_title}|" "$histfile" >"${histfile}.new"
+# $1 of $2 ago, with the plural s when needed
+ago() {
+    if [ "$1" -eq 1 ]; then
+        printf "1 %s ago" "$2"
     else
-        cp "$histfile" "${histfile}.new"
-        printf "%s\t%s\t%s\n" "$ep_no" "$anime_id" "$anime_title" >>"${histfile}.new"
+        printf "%s %ss ago" "$1" "$2"
     fi
-    mv "${histfile}.new" "$histfile"
+}
+
+# how long ago the unix time $1 was, in words. empty when unknown
+time_ago() {
+    [ "${1:-0}" -gt 0 ] 2>/dev/null || return 0
+    _age=$((now - $1))
+    if [ "$_age" -lt 60 ]; then
+        printf "just now"
+    elif [ "$_age" -lt 3600 ]; then
+        ago $((_age / 60)) minute
+    elif [ "$_age" -lt 86400 ]; then
+        ago $((_age / 3600)) hour
+    elif [ "$_age" -lt 172800 ]; then
+        printf "yesterday"
+    elif [ "$_age" -lt 2592000 ]; then
+        ago $((_age / 86400)) day
+    elif [ "$_age" -lt 31536000 ]; then
+        ago $((_age / 2592000)) month
+    else
+        ago $((_age / 31536000)) year
+    fi
+}
+
+# one line of the continue menu for a history line ($1 = episode, $2 = id, $3 = title, $4 = last watched, $5 = position):
+# id \t title \t details \t episode to play \t position \t last watched \t state (next, uptodate)
+process_hist_entry() {
+    _eps=$(hianime_episodes "$2" | cut -f 2)
+    [ -z "$_eps" ] && return 0
+    _play=$(printf "%s" "$_eps" | sed -n "/^${1}$/{n;p;}") 2>/dev/null
+    if [ -n "$_play" ]; then
+        _state=next
+        _info="ep $_play"
+    else
+        _state=uptodate
+        _play="$1"
+        _info="up to date"
+    fi
+    _ago=$(time_ago "$4")
+    printf "%s\t%s\t%-17s %-14s  \t%s\t%s\t%s\t%s\n" "$2" "$3" "$_info" "$_ago" "$_play" "${5:-0}" "${4:-0}" "$_state"
+}
+
+# the continue menu entries for every history line, last watched first
+hist_menu_entries() {
+    _entries=$(while IFS="	" read -r _ep _id _title _ts _pos; do process_hist_entry "$_ep" "$_id" "$_title" "$_ts" "$_pos" & done <"$histfile")
+    wait
+    printf "%s\n" "$_entries" | sort -t "	" -k6,6nr
+}
+
+# stores the episode being played, when, and $1, the position in seconds to resume from (0 = from the start)
+update_history() {
+    _new="$(mktemp "${histfile}.XXXXXX")" || die "Could not write the history"
+    grep -F -v "	${anime_id}	" "$histfile" >"$_new"
+    printf "%s\t%s\t%s\t%s\t%s\n" "$ep_no" "$anime_id" "$anime_title" "${now:-0}" "${1:-0}" >>"$_new"
+    mv "$_new" "$histfile"
 }
 
 # PLAYING
@@ -491,6 +547,7 @@ hist_dir="${ANI_CLI_HIST_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ani-cli}"
 [ ! -d "$hist_dir" ] && mkdir -p "$hist_dir"
 histfile="$hist_dir/ani-hsts"
 [ ! -f "$histfile" ] && : >"$histfile"
+now="$(date +%s 2>/dev/null)"
 
 source="${ANI_CLI_DEFAULT_SOURCE:-search}"
 branch="${ANI_CLI_BRANCH:-master}"
@@ -590,16 +647,24 @@ trap 'cleanup; exit 1' INT HUP TERM
 case "$source" in
     history)
         backup_old_hist
-        anime_list=$(while read -r ep_no anime_id anime_title; do process_hist_entry & done <"$histfile")
-        wait
-        [ -z "$anime_list" ] && die "No unwatched series in history!"
+        entries=$(hist_menu_entries)
+        [ -z "$entries" ] && die "No series in history!"
+        anime_list=$(printf "%s" "$entries" | cut -f 1-3)
         [ -z "${index##*[!0-9]*}" ] && anime_id=$(printf "%s" "$anime_list" | nl -w 2 | sed 's/^[[:space:]]//' | nth "Select anime: " | cut -f 1)
         [ -z "${index##*[!0-9]*}" ] || anime_id=$(printf "%s" "$anime_list" | sed -n "${index}p" | cut -f 1)
         [ -z "$anime_id" ] && exit 1
-        anime_title=$(printf "%s" "$anime_list" | grep "^$anime_id	" | cut -f 2 | sed 's| - episode.*||')
+        entry=$(printf "%s" "$entries" | grep "^$anime_id	" | head -n 1)
+        anime_title=$(printf "%s" "$entry" | cut -f 2)
+        ep_no=$(printf "%s" "$entry" | cut -f 4)
+        state=$(printf "%s" "$entry" | cut -f 7)
+        if [ "$state" = "uptodate" ]; then
+            info "$anime_title is up to date, the last episode is $ep_no"
+            # the schedule site knows the main title best
+            query=$(printf "%s" "$anime_title" | cut -d '(' -f 1 | cut -d ':' -f 1 | tr -d '[]')
+            time_until_next_ep "$query"
+        fi
         episode_maps="$(hianime_episodes "$anime_id")" || exit 1
         ep_list="$(printf "%s" "$episode_maps" | cut -f 2)"
-        ep_no=$(printf "%s" "$anime_list" | grep "^$anime_id	" | sed -nE 's/.*- episode (.+)$/\1/p')
         ;;
     *)
         if [ "$menu_program" = "fzf" ]; then
