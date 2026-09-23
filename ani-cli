@@ -58,7 +58,7 @@ help_info() {
 
     Options:
       -c, --continue
-        Continue watching from history
+        Continue watching from history, last watched first (mpv resumes where you stopped)
       -d, --download
         Download the video instead of playing it
       -D, --delete
@@ -369,12 +369,17 @@ time_ago() {
 }
 
 # one line of the continue menu for a history line ($1 = episode, $2 = id, $3 = title, $4 = last watched, $5 = position):
-# id \t title \t details \t episode to play \t position \t last watched \t state (next, uptodate)
+# id \t title \t details \t episode to play \t position \t last watched \t state (resume, next, uptodate)
 process_hist_entry() {
     _eps=$(hianime_episodes "$2" | cut -f 2)
     [ -z "$_eps" ] && return 0
     _play=$(printf "%s" "$_eps" | sed -n "/^${1}$/{n;p;}") 2>/dev/null
-    if [ -n "$_play" ]; then
+    if [ "${5:-0}" -gt 0 ] 2>/dev/null; then
+        _state=resume
+        _play="$1"
+        _clock=$(clock "$5")
+        _info="ep $1 @ $_clock"
+    elif [ -n "$_play" ]; then
         _state=next
         _info="ep $_play"
     else
@@ -399,6 +404,32 @@ update_history() {
     grep -F -v "	${anime_id}	" "$histfile" >"$_new"
     printf "%s\t%s\t%s\t%s\t%s\n" "$ep_no" "$anime_id" "$anime_title" "${now:-0}" "${1:-0}" >>"$_new"
     mv "$_new" "$histfile"
+}
+
+# the length of the playlist $1 in seconds, added up from its segments. empty when unknown
+playlist_length() {
+    _total=0
+    _segments=$(hianime_curl "$1" -e "$refr" 2>/dev/null | sed -n 's/^#EXTINF:\([0-9]*\).*/\1/p')
+    for _seconds in $_segments; do
+        _total=$((_total + _seconds))
+    done
+    [ "$_total" -gt 0 ] && printf "%s" "$_total"
+}
+
+# runs once the player quit. mpv leaves a resume file in $3 when it was closed early and none when the episode
+# was played through, played into the last tenth counts as watched too. $1 = anime id, $2 = episode, $4 = playlist
+finish_episode() {
+    _pos=$(cat "$3"/* 2>/dev/null | sed -n 's/^start=\([0-9]*\).*/\1/p' | head -n 1)
+    rm -rf "$3"
+    if [ -n "$_pos" ]; then
+        [ "$_pos" -eq 0 ] && _pos=1
+        _len=$(playlist_length "$4")
+        [ -n "$_len" ] && [ "$_pos" -ge $((_len * 9 / 10)) ] && _pos=0
+    fi
+    # unless another episode was started meanwhile
+    grep -q "^${2}	${1}	" "$histfile" || return 0
+    now="$(date +%s 2>/dev/null)"
+    update_history "${_pos:-0}"
 }
 
 # PLAYING
@@ -429,18 +460,35 @@ play_episode() {
     [ "$skip_intro" = 1 ] && skip_flag="$(ani-skip -i "$mal_id" -e "$ep_no")"
     # wait for the previous player to close (in range selection)
     wait
+    # remember the episode before the player starts, finish_episode refines the position once it quits
+    update_history "${start_pos:-0}"
+    # mpv keeps the position it was closed at in here, finish_episode picks it up
+    resume_dir="$hist_dir/resume/$anime_id/$ep_no"
+    resume_flags="--save-position-on-quit --watch-later-directory=$resume_dir"
     # shellcheck disable=SC2086
     case "$player_function" in
         debug) printf "All links:\n%s\nSelected link:\n%s\nSubtitles:\n%s\n" "$links" "$video_link" "$sub_link" ;;
         android_mpv) android_mpv ;;
         android_vlc) nohup am start --user 0 -a android.intent.action.VIEW -d "$video_link" -n org.videolan.vlc/org.videolan.vlc.gui.video.VideoPlayerActivity -e "title" "${anime_title} Episode ${ep_no}" $player_extra_flags >/dev/null 2>&1 & ;;
-        *flatpak*mpv*) flatpak run io.mpv.Mpv --referrer="$refr" ${sub_link:+--sub-file="$sub_link"} $skip_flag $player_extra_flags --force-media-title="${anime_title} Episode ${ep_no}" "$video_link" >/dev/null 2>&1 & ;;
+        *flatpak*mpv*)
+            (
+                trap '' HUP
+                flatpak run io.mpv.Mpv --referrer="$refr" ${sub_link:+--sub-file="$sub_link"} $skip_flag $resume_flags ${start_pos:+--start="$start_pos"} $player_extra_flags --force-media-title="${anime_title} Episode ${ep_no}" "$video_link" >/dev/null 2>&1
+                finish_episode "$anime_id" "$ep_no" "$resume_dir" "$video_link"
+            ) &
+            ;;
         *mpv*)
             if [ "$no_detach" = 0 ]; then
-                nohup $player_function --referrer="$refr" ${sub_link:+--sub-file="$sub_link"} $skip_flag $player_extra_flags --force-media-title="${anime_title} Episode ${ep_no}" "$video_link" >/dev/null 2>&1 &
+                # the watcher outlives the script and records how far the episode was played once mpv quits
+                (
+                    trap '' HUP
+                    nohup $player_function --referrer="$refr" ${sub_link:+--sub-file="$sub_link"} $skip_flag $resume_flags ${start_pos:+--start="$start_pos"} $player_extra_flags --force-media-title="${anime_title} Episode ${ep_no}" "$video_link" >/dev/null 2>&1
+                    finish_episode "$anime_id" "$ep_no" "$resume_dir" "$video_link"
+                ) &
             else
-                $player_function --referrer="$refr" ${sub_link:+--sub-file="$sub_link"} $skip_flag $player_extra_flags --force-media-title="${anime_title} Episode ${ep_no}" "$video_link"
+                $player_function --referrer="$refr" ${sub_link:+--sub-file="$sub_link"} $skip_flag $resume_flags ${start_pos:+--start="$start_pos"} $player_extra_flags --force-media-title="${anime_title} Episode ${ep_no}" "$video_link"
                 mpv_exitcode=$?
+                finish_episode "$anime_id" "$ep_no" "$resume_dir" "$video_link"
                 [ "$exit_after_play" = 1 ] && [ -z "$_range" ] && exit "$mpv_exitcode"
             fi
             ;;
@@ -449,12 +497,16 @@ play_episode() {
             _sub_iina="$(printf "%s" "$sub_link" | sed 's|:|\\:|g')"
             if pgrep -f "IINA" >/dev/null 2>&1; then
                 # omit --keep-running when an IINA instance exists to prevent hanging
-                nohup $player_function --mpv-referrer="$refr" ${_sub_iina:+--mpv-sub-files="$_sub_iina"} $player_extra_flags --no-stdin --mpv-force-media-title="${anime_title} Episode ${ep_no}" "$video_link" >/dev/null 2>&1 &
+                nohup $player_function --mpv-referrer="$refr" ${_sub_iina:+--mpv-sub-files="$_sub_iina"} $player_extra_flags --no-stdin --mpv-save-position-on-quit --mpv-watch-later-directory="$resume_dir" ${start_pos:+--mpv-start="$start_pos"} --mpv-force-media-title="${anime_title} Episode ${ep_no}" "$video_link" >/dev/null 2>&1 &
             else
-                nohup $player_function --mpv-referrer="$refr" ${_sub_iina:+--mpv-sub-files="$_sub_iina"} $player_extra_flags --no-stdin --keep-running --mpv-force-media-title="${anime_title} Episode ${ep_no}" "$video_link" >/dev/null 2>&1 &
+                (
+                    trap '' HUP
+                    nohup $player_function --mpv-referrer="$refr" ${_sub_iina:+--mpv-sub-files="$_sub_iina"} $player_extra_flags --no-stdin --keep-running --mpv-save-position-on-quit --mpv-watch-later-directory="$resume_dir" ${start_pos:+--mpv-start="$start_pos"} --mpv-force-media-title="${anime_title} Episode ${ep_no}" "$video_link" >/dev/null 2>&1
+                    finish_episode "$anime_id" "$ep_no" "$resume_dir" "$video_link"
+                ) &
             fi
             ;;
-        *vlc*) nohup $player_function --http-referrer="$refr" $player_extra_flags --play-and-exit --meta-title="${anime_title} Episode ${ep_no}" "$video_link" ${sub_link:+:input-slave="$sub_link"} >/dev/null 2>&1 & ;;
+        *vlc*) nohup $player_function --http-referrer="$refr" $player_extra_flags --play-and-exit ${start_pos:+--start-time="$start_pos"} --meta-title="${anime_title} Episode ${ep_no}" "$video_link" ${sub_link:+:input-slave="$sub_link"} >/dev/null 2>&1 & ;;
         *yncpla*) nohup $player_function $player_extra_flags "$video_link" -- $skip_flag --referrer="$refr" ${sub_link:+--sub-file="$sub_link"} --force-media-title="${anime_title} Episode ${ep_no}" >/dev/null 2>&1 & ;;
         download) "$player_function" "$video_link" "${anime_title} Episode ${ep_no}" $player_extra_flags ;;
         catt) nohup catt cast $player_extra_flags "$video_link" >/dev/null 2>&1 & ;;
@@ -465,8 +517,7 @@ play_episode() {
         *) nohup $player_function $player_extra_flags "$video_link" >/dev/null 2>&1 & ;;
     esac
     replay="$video_link"
-    unset video_link
-    update_history
+    unset video_link start_pos
     [ "$menu_program" != "fzf" ] && wait
 }
 
@@ -588,6 +639,7 @@ while [ $# -gt 0 ]; do
             ;;
         -D | --delete)
             : >"$histfile"
+            rm -rf "$hist_dir/resume"
             exit 0
             ;;
         -l | --logview)
@@ -656,6 +708,8 @@ case "$source" in
         entry=$(printf "%s" "$entries" | grep "^$anime_id	" | head -n 1)
         anime_title=$(printf "%s" "$entry" | cut -f 2)
         ep_no=$(printf "%s" "$entry" | cut -f 4)
+        start_pos=$(printf "%s" "$entry" | cut -f 5)
+        [ "$start_pos" = 0 ] && unset start_pos
         state=$(printf "%s" "$entry" | cut -f 7)
         if [ "$state" = "uptodate" ]; then
             info "$anime_title is up to date, the last episode is $ep_no"
