@@ -8,14 +8,14 @@ version_number="5.1.4"
 # $1 = prompt, $2 = multi select flag (for fzf/rofi), $3 = extra flags by user
 menu() {
     case "$menu_program" in
-        fzf) fzf --reverse --cycle --prompt "$1" $2 $3 ;;
+        fzf) fzf --reverse --cycle --prompt "$1" --delimiter '\t' --with-nth 1,4,3 --tabstop 4 $2 $3 ;;
         rofi) rofi -sort -dmenu -i -p "$1" $2 $3 ;;
         dmenu) dmenu -l 20 -p "$1" $3 ;;
         *) "$menu_program" $3 "$1" ;;
     esac
 }
 
-# provide menu. input format is either (ep_list) or (number \t anime_id \t anime_name)
+# provide menu. input format is either (ep_list) or (number \t anime_id \t anime_name [\t details])
 nth() {
     _stdin=$(cat -)
     [ -z "$_stdin" ] && return 1
@@ -23,7 +23,13 @@ nth() {
     [ "$_line_count" -eq 1 ] && printf "%s" "$_stdin" | cut -f 2,3 && return 0
     _prompt="$1"
     [ $# -ne 1 ] && _multi_flag="$2"
-    _line=$(printf "%s" "$_stdin" | cut -f 1,3 | tr '\t' ' ' | menu "$_prompt" "$_multi_flag" "$menu_extra_flags" | cut -d " " -f 1)
+    if [ "$menu_program" = "fzf" ]; then
+        # fzf gets the raw lines, it hides the id and reorders the columns itself (see menu)
+        _line=$(printf "%s" "$_stdin" | menu "$_prompt" "$_multi_flag" "$menu_extra_flags" | cut -f 1)
+    else
+        # other menus get plain text: number, details (if any), then the name. literal tabs, BSD sed has no \t in brackets
+        _line=$(printf "%s" "$_stdin" | sed -E 's|^([^	]*)	[^	]*	([^	]*)	([^	]*)$|\1 \3 \2|' | cut -f 1,3 | tr '\t' ' ' | menu "$_prompt" "$_multi_flag" "$menu_extra_flags" | cut -d " " -f 1)
+    fi
     _line_start=$(printf "%s" "$_line" | head -n 1)
     _line_end=$(printf "%s" "$_line" | tail -n 1)
     [ -n "$_line" ] || return 1
