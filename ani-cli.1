@@ -1,4 +1,4 @@
-.TH "ANI-CLI" "1" "August 2026" "ani-cli" "User Commands"
+.TH "ANI-CLI" "1" "September 2026" "ani-cli" "User Commands"
 .SH NAME
 ani-cli \- watch anime from the commandline
 .SH SYNOPSIS
@@ -20,7 +20,7 @@ This tool scrapes the site hianime.
 Specify the episode numbers to watch. If a range is specified, it should be quoted or separated by a non-numeric character (e.g. -). Use 0 for the first available episode and -1 for the last.
 .TP
 \fB\-c | --continue\fR
-Continue watching anime from history.
+Continue watching anime from history, the show you watched most recently comes first. A show whose last episode you have seen stays in the list as "up to date" and prints the countdown to its next episode. With mpv (also iina, the flatpak and mpv.exe) an episode you closed early is offered again with the position to resume from; other players only remember the episode.
 .TP
 \fB\-d | --download\fR
 Download episode.
@@ -103,7 +103,7 @@ Controls the flags for the frontend. Last flag must take prompt as argument. Def
 Controls the logging feature for playback. Can be 1(logs) or 0(doesn't log). Default is 1.
 .TP
 \fBANI_CLI_HIST_DIR\fR
-Controls the directory ani-cli uses for storing history. A /ani-cli subfolder is created there for the histfile if doesn't exists. Default is $XDG_STATE_HOME if set, $HOME/.local/state if not.
+Controls the directory ani-cli uses for storing history. A /ani-cli subfolder is created there for the histfile if doesn't exists. Default is $XDG_STATE_HOME if set, $HOME/.local/state if not. The history has one line per show: episode, id, title, when it was last watched (unix time) and the position in seconds to resume from. The resume files mpv writes live in a resume subfolder next to it.
 .TP
 \fBANI_CLI_DEFAULT_SOURCE\fR
 Controls the default source. Valid is history (equivalent to -c), everything else means search. Default is search.

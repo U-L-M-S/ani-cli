@@ -557,6 +557,8 @@ Ani-skip uses the external lua script function of mpv and as such â€“ for now â€
 * How can I download? - Use `-d`, it will download into your working directory.
 * Can i change download folder? - Yes, set the `ANI_CLI_DOWNLOAD_DIR` to your desired location.
 * How can I bulk download? - `Use -d -e firstepisode-lastepisode`, for example `ani-cli onepiece -d -e 1-1000`.
+* How does `-c` know what I watched? - Every play is stored with the time, so the show you watched last comes first. With mpv (also iina, the flatpak and mpv.exe) ani-cli notices when you close an episode early and offers it again with the position to resume from; playing into the last tenth counts as watched. Other players only remember the episode, as before.
+* A show I finished is gone from `-c`? - Not anymore, it stays listed as "up to date" and picking it prints the countdown to the next episode.
 
 **Note:** All features are documented in `ani-cli --help`.
 
